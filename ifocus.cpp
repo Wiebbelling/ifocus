@@ -18,7 +18,7 @@
 #endif
 
 #ifndef HOUGH_MEANS
-#define HOUGH_MEANS 100
+#define HOUGH_MEANS 10
 #endif
 
 #ifndef X_THRESHOLD
@@ -198,17 +198,12 @@ change_focus(cv::Point &pos)
 #endif
     if ((ABS(delta.x) >= X_THRESHOLD) || (ABS(delta.y) >= Y_THRESHOLD)) {
       g_skipped_detects = 0;
-      if ((delta.x < 0) || (delta.y < 0)) {
-        system("xdotool key alt+k");
 #if DEBUG >= DEBUG_TEXT
-        printf("SOBE\n");
+      printf("%d %d\n", delta.x, delta.y);
 #endif
-      } else {
-        system("xdotool key alt+j");
-#if DEBUG >= DEBUG_TEXT
-        printf("DESCE\n");
-#endif
-      }
+      char buffer[256];
+      snprintf(buffer, 256, "xdotool mousemove_relative -- %d %d", delta.x * 100, delta.y * 100);
+      system(buffer);
     }
   } else {
     g_skipped_detects++;
