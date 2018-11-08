@@ -2,11 +2,11 @@ CC=g++
 STD=-std=c++11
 WARN=-Wall -Wextra -Wpedantic -Wformat-security -Wfloat-equal -Wshadow\
      -Wconversion -Winline -Wpadded
-OPT=-O2 -march=native -ffinite-math-only -fno-signed-zeros
+OPT=-O2 -march=native -ffinite-math-only -fno-signed-zeros -DDEBUG=1
 DBG=-O0 -g -ggdb -DDEBUG=2
 EXTRA=$(shell pkg-config --cflags opencv) -DINVERT_AXIS
 LINK=$(shell pkg-config --libs opencv)
-OPENCV_PATH=/usr/local/Cellar/opencv/3.4.3/share/OpenCV
+OPENCV_PATH=/usr/share/OpenCV
 
 DEBUG=$(STD) $(WARN) $(DBG) $(EXTRA) $(LINK)
 RELEASE=$(STD) $(WARN) $(OPT) $(EXTRA) $(LINK)

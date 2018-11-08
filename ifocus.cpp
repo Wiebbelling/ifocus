@@ -18,15 +18,15 @@
 #endif
 
 #ifndef HOUGH_MEANS
-#define HOUGH_MEANS 5
+#define HOUGH_MEANS 100
 #endif
 
 #ifndef X_THRESHOLD
-#define X_THRESHOLD 3
+#define X_THRESHOLD 1
 #endif
 
 #ifndef Y_THRESHOLD
-#define Y_THRESHOLD 3
+#define Y_THRESHOLD 100
 #endif
 
 #ifndef MIN_EYE_SIZE
@@ -42,6 +42,8 @@
 #define SLEEP_MS 30
 #endif
 
+enum Status { NaoDetectando, Estabilizando, OK };
+
 #define ABS(x) ((x) > 0 ? (x) : -(x))
 
 #define MAX_CIRCLES 5
@@ -50,6 +52,9 @@
 int centers_x[HOUGH_MEANS] = { 0 };
 int centers_y[HOUGH_MEANS] = { 0 };
 uint8_t cur_center;
+uint64_t centers_total = 0;
+
+uint64_t frames_sem_detect = 0;
 
 cv::Point g_last_pos;
 int g_last_leftmost_tl = INT_MAX;
@@ -61,7 +66,7 @@ uint8_t g_ignored_lefts = 0;
  */
 uint16_t g_skipped_detects = 0;
 #ifndef SKIP_DETECTS
-#define SKIP_DETECTS HOUGH_MEANS
+#define SKIP_DETECTS 0
 #endif
 
 /*
@@ -188,7 +193,9 @@ change_focus(cv::Point &pos)
    */
 
   if (g_skipped_detects >= SKIP_DETECTS) {
+#if DEBUG >= DEBUG_TEXT
     printf("%d %d\n", delta.x, delta.y);
+#endif
     if ((ABS(delta.x) >= X_THRESHOLD) || (ABS(delta.y) >= Y_THRESHOLD)) {
       g_skipped_detects = 0;
       if ((delta.x < 0) || (delta.y < 0)) {
@@ -213,9 +220,10 @@ change_focus(cv::Point &pos)
   g_last_pos = pos;
 }
 
-void
+int
 detect_and_react(cv::Mat &frame, cv::CascadeClassifier &face_classifier, cv::CascadeClassifier &eye_classifier)
 {
+  int ans = 1;
   /* Deixa em preto e branco, para detecção */
   cv::Mat frame_pb;
   cv::cvtColor(frame, frame_pb, CV_BGR2GRAY);
@@ -234,7 +242,7 @@ detect_and_react(cv::Mat &frame, cv::CascadeClassifier &face_classifier, cv::Cas
    */
   /* Se nenhuma face foi detectada, segue a vida. Mais frames virão. */
   if (faces.size() < 1)
-    return;
+    return ans;
   /* Utiliza apenas uma das faces detectadas - não faz usar mais de uma */
   cv::Mat face = frame_pb(faces[0]);
   /*
@@ -249,11 +257,11 @@ detect_and_react(cv::Mat &frame, cv::CascadeClassifier &face_classifier, cv::Cas
 #endif
   /* Precisamos de pelo menos um olho */
   if (eyes.size() < 1)
-    return;
+    return ans;
   /* Utiliza apenas um dos olhos */
   int leftmost = get_leftmost_eye(eyes);
   if (leftmost < 0)
-    return;
+    return ans;
   cv::Rect eye_rect = eyes[leftmost];
 #if DEBUG >= DEBUG_GTK
   /* Desenha um retângulo verde no olho sendo usado */
@@ -300,9 +308,11 @@ detect_and_react(cv::Mat &frame, cv::CascadeClassifier &face_classifier, cv::Cas
     centers_x[cur_center] = (int)(iris[0]);
     centers_y[cur_center] = (int)(iris[1]);
     cur_center = (uint8_t)((cur_center + 1) % HOUGH_MEANS);
+    centers_total++;
     cv::Point center;
     mean_center(center);
     change_focus(center);
+    ans = 0;
 #if DEBUG >= DEBUG_GTK
     /* Desenha o círculo na imagem da face */
     cv::circle(frame, faces[0].tl() + eye_rect.tl() + center, (int)(iris[2]), cv::Scalar(0, 0, 255), 2);
@@ -316,6 +326,7 @@ detect_and_react(cv::Mat &frame, cv::CascadeClassifier &face_classifier, cv::Cas
   /* Move a janela para não ficar embaixo da maior */
   cv::moveWindow("Eye", 900, 300);
 #endif
+  return ans;
 }
 
 void
@@ -330,6 +341,26 @@ capture_frame(cv::VideoCapture &cap, cv::Mat &frame)
 #endif
 }
 
+void
+show_status(enum Status status)
+{
+  cv::Mat window = cv::Mat::zeros(10, 10, CV_8UC3);//CV_WINDOW_AUTOSIZE);
+  switch (status) {
+    case NaoDetectando :
+      window.setTo(cv::Scalar(0,0,255));
+      break;
+    case Estabilizando :
+      window.setTo(cv::Scalar(0,255,255));
+      break;
+    case OK :
+      window.setTo(cv::Scalar(0,255,0));
+      break;
+    default :
+      fprintf(stderr, "Status desconhecido : %d\n", (int)status);
+  }
+  cv::imshow("Status", window);
+}
+
 int
 main(void)
 {
@@ -340,11 +371,7 @@ main(void)
     fprintf(stderr, "Missing files.\n");
     exit(EXIT_FAILURE);
   }
-
-  cv::VideoCapture cap;
-    cap.open(0);
-
-//  cv::VideoCapture cap(-1);
+  cv::VideoCapture cap(-1);
   if (!cap.isOpened()) {
     fprintf(stderr, "No webcam found.\n");
     exit(EXIT_FAILURE);
@@ -353,20 +380,23 @@ main(void)
   capture_frame(cap, frame);
   bool done = !frame.data;
   while (!done) {
-    detect_and_react(frame, face_classifier, eye_classifier);
+    if (detect_and_react(frame, face_classifier, eye_classifier))
+      frames_sem_detect++;
+    else
+      frames_sem_detect = 0;
 #if DEBUG >= DEBUG_GTK
     cv::imshow("Webcam", frame);
-    int keypress = cv::waitKey(SLEEP_MS);
-#else
-    usleep(SLEEP_MS);
 #endif
+    int keypress = cv::waitKey(SLEEP_MS);
+    if (centers_total < 50)
+      show_status(Estabilizando);
+    else if (frames_sem_detect > SLEEP_MS)
+      show_status(NaoDetectando);
+    else
+      show_status(OK);
     capture_frame(cap, frame);
-#if DEBUG >= DEBUG_GTK
     done = (!(frame.data)) || (keypress == 81) || (keypress == 113);
     /*                                     ^ Q                 ^ q */
-#else
-    done = !(frame.data);
-#endif
   }
   return 0;
 }
