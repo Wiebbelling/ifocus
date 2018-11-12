@@ -3,6 +3,7 @@
 #include <stdint.h>
 //#include <omp.h>
 #include <unistd.h>
+#include <cmath>
 
 #include <opencv2/core/core.hpp>
 #include <opencv2/highgui/highgui.hpp>
@@ -18,7 +19,7 @@
 #endif
 
 #ifndef HOUGH_MEANS
-#define HOUGH_MEANS 5
+#define HOUGH_MEANS 1
 #endif
 
 #ifndef X_THRESHOLD
@@ -30,7 +31,7 @@
 #endif
 
 #ifndef MIN_EYE_SIZE
-#define MIN_EYE_SIZE 30
+#define MIN_EYE_SIZE 20
 #endif
 
 #ifndef MAX_EYE_SIZE
@@ -187,17 +188,20 @@ change_focus(cv::Point &pos)
    * detecções o suficiente desde a última mudança de foco.
    */
 
-  if (g_skipped_detects >= SKIP_DETECTS) {
-    printf("%d %d\n", delta.x, delta.y);
-    if ((ABS(delta.x) >= X_THRESHOLD) || (ABS(delta.y) >= Y_THRESHOLD)) {
+  if (g_skipped_detects >= SKIP_DETECTS) 
+  {
+    printf("Original: %d %d\n", delta.x, delta.y);
+    printf("Power: %f %f\n", pow(delta.x,2), pow(delta.y,2));
+    if ((ABS(pow(delta.x,2)) >= X_THRESHOLD) || (ABS(pow(delta.y,2)) >= Y_THRESHOLD)) 
+    {
       g_skipped_detects = 0;
-      if ((delta.x < 0) || (delta.y < 0)) {
-        system("xdotool key alt+k");
+      if ((pow(delta.x,2) < 0) || (pow(delta.y,2) < 0)) {
+        // system("xdotool key alt+k");
 #if DEBUG >= DEBUG_TEXT
         printf("SOBE\n");
 #endif
       } else {
-        system("xdotool key alt+j");
+        // system("xdotool key alt+j");
 #if DEBUG >= DEBUG_TEXT
         printf("DESCE\n");
 #endif
@@ -342,13 +346,15 @@ main(void)
   }
 
   cv::VideoCapture cap;
-    cap.open(0);
+  cap.open(0);
 
 //  cv::VideoCapture cap(-1);
+  
   if (!cap.isOpened()) {
     fprintf(stderr, "No webcam found.\n");
     exit(EXIT_FAILURE);
   }
+
   cv::Mat frame;
   capture_frame(cap, frame);
   bool done = !frame.data;
