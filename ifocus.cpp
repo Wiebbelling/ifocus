@@ -3,7 +3,6 @@
 #include <stdint.h>
 //#include <omp.h>
 #include <unistd.h>
-#include <cmath>
 
 #include <opencv2/core/core.hpp>
 #include <opencv2/highgui/highgui.hpp>
@@ -19,19 +18,19 @@
 #endif
 
 #ifndef HOUGH_MEANS
-#define HOUGH_MEANS 1
+#define HOUGH_MEANS 10
 #endif
 
 #ifndef X_THRESHOLD
-#define X_THRESHOLD 3
+#define X_THRESHOLD 1
 #endif
 
 #ifndef Y_THRESHOLD
-#define Y_THRESHOLD 3
+#define Y_THRESHOLD 100
 #endif
 
 #ifndef MIN_EYE_SIZE
-#define MIN_EYE_SIZE 20
+#define MIN_EYE_SIZE 30
 #endif
 
 #ifndef MAX_EYE_SIZE
@@ -47,80 +46,24 @@
 
 #define MAX_CIRCLES 5
 
-/* Centros das últimas HOUGH_MEANS detecções de íris */
-int centers_x[HOUGH_MEANS] = { 0 };
-int centers_y[HOUGH_MEANS] = { 0 };
-uint8_t cur_center;
-
 cv::Point g_last_pos;
 int g_last_leftmost_tl = INT_MAX;
 uint8_t g_ignored_lefts = 0;
+#define IGNORE_LEFTS 4
 
-/*
- * Como o movimento do olho vai e volta, temos que considerar apenas a idea.
- * Portanto, define um número de círculos a ignorar após uma mudança de foco.
- */
-uint16_t g_skipped_detects = 0;
-#ifndef SKIP_DETECTS
-#define SKIP_DETECTS HOUGH_MEANS
-#endif
-
-/*
- * Dado um vetor com as coordenadas de círculos já detectados e a imagem do
- * olho já em preto e branco e alto contraste, retorna o círculo que é a íris.
- */
-cv::Vec3f
-get_iris(cv::Mat &eye, std::vector<cv::Vec3f> &circles)
+cv::Point
+get_iris(cv::Rect &eye, cv::Mat &face)
 {
-  uint8_t ans = 0;
-  /*
-   * Se detectamos múltiplos círculos, é preciso detectar qual deles é a íris.
-   *
-   * Nossa imagem é preto e branca. Ao somar os valores de todos pxs que estão
-   * dentro de determinado círulo, estamos somando os valores de branco. Como
-   * múltiplos círculos podem ser detectados, e queremos apenas o da íris,
-   * vamos selecionar aquele com a menor soma - o mais preto.
-   */
-  if (circles.size() > 1) {
-    /*
-     * O máximo é 640 * 480 * 255 = 78336000, cabe num uint32_t (2^32 - 1 =
-     * 4294967295). Assume que teremos no máximo MAX_CIRCLES detectados, para
-     * evitar alocação dinâmica.
-     */
-    uint32_t sums[MAX_CIRCLES];
-    /*
-     * Vide https://docs.opencv.org/2.4/doc/tutorials/core/how_to_scan_images/how_to_scan_images.html?highlight=accessing%20element
-     * Esse é o método mais eficiente de varrer a imagem. Como nossa imagem é
-     * 640x480 usamos um uint16. Also, não esperamos muitos círculos, então
-     * uint8_t.
-     */
-    uint8_t ncircles = (uint8_t)(circles.size() > MAX_CIRCLES ? MAX_CIRCLES : circles.size());
-    // TODO paralelizar
-    for (uint16_t y = 0; y < eye.rows; y++) {
-      for (uint16_t x = 0; x < eye.cols; x++) {
-        for (uint8_t i = 0; i < ncircles; i++) {
-          uint32_t xx = (uint32_t)(circles[i][0]),
-                   yy = (uint32_t)(circles[i][1]),
-                    r = (uint32_t)(circles[i][2]);
-          /* eye.ptr espera a coordenada do início de uma linha, não um px */
-          uchar *ptr = eye.ptr<uchar>(y);
-          /* Calcula os deltas e vê se o ponto está dentro do círculo */
-          uint32_t dx = x - xx,
-                   dy = y - yy;
-          if ((dx * dx) + (dy * dy) < (r * r))
-            sums[i] += uint32_t(ptr[x]);
-        }
-      }
-    }
-    uint32_t min = UINT32_MAX;
-    for (uint8_t i = 0; i < ncircles; i++) {
-      if (sums[i] < min) {
-        min = sums[i];
-        ans = i;
-      }
-    }
-  }
-  return circles[ans];
+  cv::Point ans;
+  ans.x = eye.height / 2;
+  ans.y = eye.width  / 2;
+  cv::Mat ROI(face, eye);
+  cv::Size s;
+  cv::Point offset;
+  ROI.locateROI(s, offset);
+  ans.x += offset.x;
+  ans.y += offset.y;
+  return ans;
 }
 
 /*
@@ -144,7 +87,7 @@ get_leftmost_eye(std::vector<cv::Rect> &eyes)
    * à direita, depois para de ignorar.
    */
   if (leftmost > (g_last_leftmost_tl + (g_last_leftmost_tl / 3)) &&
-      g_ignored_lefts < 2) {
+      g_ignored_lefts < 4) {
 #if DEBUG >= DEBUG_TEXT
     printf("Olho está muito à direita, ignorando por ora.\n");
 #endif
@@ -157,22 +100,10 @@ get_leftmost_eye(std::vector<cv::Rect> &eyes)
   }
 }
 
-/*
- * Retorna o centro médio, dados os últimos detectados
- */
-void
-mean_center(cv::Point &center)
-{
-  uint8_t actually_done = 0;
-  for (uint8_t i = 0; i < HOUGH_MEANS; i++)
-    if ((centers_x != 0) || (centers_y != 0)) {
-      center.x += centers_x[i];
-      center.y += centers_y[i];
-      actually_done++;
-    }
-  center.x /= actually_done;
-  center.y /= actually_done;
-}
+#define SCALE_(x) (pow(MAX(1, (x)), 2))
+
+#define SCALE(x) ((x) > 0 ? SCALE_((x)) : -SCALE_(-(x)))
+
 
 /*
  * Muda o foco da janela de acordo com a nova posição; atualiza a antiga.
@@ -181,45 +112,23 @@ void
 change_focus(cv::Point &pos)
 {
   cv::Point delta;
-  delta.x = (pos.x - g_last_pos.x);
-  delta.y = (pos.y - g_last_pos.y);
-  /*
-   * Move o foco apenas se o usuário mexeu o suficiente o olho e se já pulamos
-   * detecções o suficiente desde a última mudança de foco.
-   */
-
-  if (g_skipped_detects >= SKIP_DETECTS) 
-  {
-    printf("Original: %d %d\n", delta.x, delta.y);
-    printf("Power: %f %f\n", pow(delta.x,2), pow(delta.y,2));
-    if ((ABS(pow(delta.x,2)) >= X_THRESHOLD) || (ABS(pow(delta.y,2)) >= Y_THRESHOLD)) 
-    {
-      g_skipped_detects = 0;
-      if ((pow(delta.x,2) < 0) || (pow(delta.y,2) < 0)) {
-        // system("xdotool key alt+k");
+  delta.x = SCALE(pos.x - g_last_pos.x);
+  delta.y = SCALE(pos.y - g_last_pos.y);
+  /* Move o foco */
 #if DEBUG >= DEBUG_TEXT
-        printf("SOBE\n");
+  printf("%d %d\n", delta.x, delta.y);
 #endif
-      } else {
-        // system("xdotool key alt+j");
-#if DEBUG >= DEBUG_TEXT
-        printf("DESCE\n");
-#endif
-      }
-    }
-  } else {
-    g_skipped_detects++;
-#if DEBUG >= DEBUG_TEXT
-    printf("Acabamos de mover o foco, esperando o olho voltar à posição central\n");
-#endif
-  }
+  char buffer[256];
+  snprintf(buffer, 256, "xdotool mousemove_relative -- %d %d", delta.x, delta.y);
+  system(buffer);
   /* Atuliza globais */
   g_last_pos = pos;
 }
 
-void
+int
 detect_and_react(cv::Mat &frame, cv::CascadeClassifier &face_classifier, cv::CascadeClassifier &eye_classifier)
 {
+  int ans = 1;
   /* Deixa em preto e branco, para detecção */
   cv::Mat frame_pb;
   cv::cvtColor(frame, frame_pb, CV_BGR2GRAY);
@@ -238,7 +147,7 @@ detect_and_react(cv::Mat &frame, cv::CascadeClassifier &face_classifier, cv::Cas
    */
   /* Se nenhuma face foi detectada, segue a vida. Mais frames virão. */
   if (faces.size() < 1)
-    return;
+    return ans;
   /* Utiliza apenas uma das faces detectadas - não faz usar mais de uma */
   cv::Mat face = frame_pb(faces[0]);
   /*
@@ -253,73 +162,24 @@ detect_and_react(cv::Mat &frame, cv::CascadeClassifier &face_classifier, cv::Cas
 #endif
   /* Precisamos de pelo menos um olho */
   if (eyes.size() < 1)
-    return;
+    return ans;
   /* Utiliza apenas um dos olhos */
   int leftmost = get_leftmost_eye(eyes);
   if (leftmost < 0)
-    return;
+    return ans;
   cv::Rect eye_rect = eyes[leftmost];
 #if DEBUG >= DEBUG_GTK
   /* Desenha um retângulo verde no olho sendo usado */
-  //for (cv::Rect &eye : eyes)
-  //  cv::rectangle(frame, faces[0].tl() + eye.tl(), faces[0].tl() + eye.br(), cv::Scalar(0, 255, 0), 2);
   cv::rectangle(frame, faces[0].tl() + eye_rect.tl(), faces[0].tl() + eye_rect.br(), cv::Scalar(0, 255, 0), 2);
 #endif
-  /* Dada a imagem maior (face), cropa o olho */
-  cv::Mat eye = face(eye_rect);
-  /* Aumenta o contraste */
-  cv::equalizeHist(eye, eye);
-  //cv::medianBlur(eye, eye, 3);
-  //cv::Scalar mean = cv::mean(eye);
-  //cv::Mat mask;
-  //cv::inRange(eye, mean * 0.8, 255, mask);
-  //mask = 255 - mask;
-  //cv::imshow("Mask", mask);
-  /*
-   * Detecta o(s) círculo(s)
-   * Vide https://docs.opencv.org/2.4/doc/tutorials/imgproc/imgtrans/hough_circle/hough_circle.html
-   *
-   * Os valores para mínimo e máximo foram retirados de
-   * https://picoledelimao.github.io/blog/2017/01/28/eyeball-tracking-for-mouse-control-in-opencv/
-   *
-   * ... que utiliza valores otimizados para a resolução com que trabalhamos
-   */
-  std::vector<cv::Vec3f> circles;
-  cv::HoughCircles(eye, circles, CV_HOUGH_GRADIENT, 1, eye.cols / 8, 250, 15, eye.rows / 8, eye.rows / 3);
-  /*                             ^                  ^  ^             ^    ^   ^             ^ Raio máximo
-   *                             |                  |  |             |    |   +- Raio mínimo do círculo
-   *                             |                  |  |             |    +- Área mínima do círculo
-   *                             |                  |  |             +- Threshold de detecção
-   *                             |                  |  +- Distância mínima entre os círculos
-   *                             |                  +- Valor padrão
-   *                             +- Método a ser usado para a detecção
-   */
-  if (circles.size() > 0) {
-    /* Pega a íris a partir de possivelmente múltiplos círculos (em geral 1) */
-    cv::Vec3f iris = get_iris(eye, circles);
-    /*
-     * O método para detectar círculos é bem instável, portanto determina o
-     * centro do círculo como uma média dos centros dos últimos círculos.
-     */
-    centers_x[cur_center] = (int)(iris[0]);
-    centers_y[cur_center] = (int)(iris[1]);
-    cur_center = (uint8_t)((cur_center + 1) % HOUGH_MEANS);
-    cv::Point center;
-    mean_center(center);
-    change_focus(center);
+  cv::Point iris = get_iris(eye_rect, face);
+  change_focus(iris);
+  ans = 0;
 #if DEBUG >= DEBUG_GTK
-    /* Desenha o círculo na imagem da face */
-    cv::circle(frame, faces[0].tl() + eye_rect.tl() + center, (int)(iris[2]), cv::Scalar(0, 0, 255), 2);
-    /* Desenha o círculo na imagem do olho */
-    cv::circle(eye, center, (int)(iris[2]), cv::Scalar(255, 255, 255), 2);
+  /* Desenha o círculo na imagem da face */
+  cv::circle(frame, iris, MAX(1, eye_rect.height / 10), cv::Scalar(0, 0, 255), -1);
 #endif
-  }
-#if DEBUG >= DEBUG_GTK
-  /* Exibe a imagem do olho */
-  cv::imshow("Eye", eye);
-  /* Move a janela para não ficar embaixo da maior */
-  cv::moveWindow("Eye", 900, 300);
-#endif
+  return ans;
 }
 
 void
@@ -337,24 +197,17 @@ capture_frame(cv::VideoCapture &cap, cv::Mat &frame)
 int
 main(void)
 {
-  cur_center = 0;
   cv::CascadeClassifier face_classifier;
   cv::CascadeClassifier eye_classifier;
   if (!face_classifier.load("./haarcascade_frontalface_alt.xml") || !eye_classifier.load("./haarcascade_eye_tree_eyeglasses.xml")) {
     fprintf(stderr, "Missing files.\n");
     exit(EXIT_FAILURE);
   }
-
-  cv::VideoCapture cap;
-  cap.open(0);
-
-//  cv::VideoCapture cap(-1);
-  
+  cv::VideoCapture cap(-1);
   if (!cap.isOpened()) {
     fprintf(stderr, "No webcam found.\n");
     exit(EXIT_FAILURE);
   }
-
   cv::Mat frame;
   capture_frame(cap, frame);
   bool done = !frame.data;
@@ -362,17 +215,11 @@ main(void)
     detect_and_react(frame, face_classifier, eye_classifier);
 #if DEBUG >= DEBUG_GTK
     cv::imshow("Webcam", frame);
-    int keypress = cv::waitKey(SLEEP_MS);
-#else
-    usleep(SLEEP_MS);
 #endif
+    int keypress = cv::waitKey(SLEEP_MS);
     capture_frame(cap, frame);
-#if DEBUG >= DEBUG_GTK
     done = (!(frame.data)) || (keypress == 81) || (keypress == 113);
     /*                                     ^ Q                 ^ q */
-#else
-    done = !(frame.data);
-#endif
   }
   return 0;
 }
